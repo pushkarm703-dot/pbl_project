@@ -326,12 +326,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-## 📊 Project Stats
-
-![GitHub stars](https://img.shields.io/github/stars/yourusername/raahnuma?style=social)
-![GitHub forks](https://img.shields.io/github/forks/yourusername/raahnuma?style=social)
-![GitHub issues](https://img.shields.io/github/issues/yourusername/raahnuma)
-![GitHub pull requests](https://img.shields.io/github/issues-pr/yourusername/raahnuma)
 
 ---
 
