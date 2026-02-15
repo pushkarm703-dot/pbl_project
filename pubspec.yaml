@@ -1,0 +1,34 @@
+name: raahnuma
+description: "राहनुमा - Your guide to safer streets."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.6
+
+  # Camera
+  image_picker: ^1.1.2
+
+  # GPS
+  geolocator: ^13.0.1
+
+  # OpenStreetMap
+  flutter_map: ^7.0.2
+  latlong2: ^0.9.1
+
+  # Firebase (NO Storage)
+  firebase_core: ^3.6.0
+  firebase_auth: ^5.3.1
+  cloud_firestore: ^5.4.4
+
+  # Image processing for ML validation
+  image: ^4.1.7
+
+flutter:
+  uses-material-design: true

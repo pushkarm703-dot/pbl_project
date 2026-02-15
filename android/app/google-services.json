@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "966002393690",
+    "project_id": "raahnuma-new",
+    "storage_bucket": "raahnuma-new.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:966002393690:android:e27758123811cc87f68e63",
+        "android_client_info": {
+          "package_name": "com.example.untitled"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAM2m4lI2-sEV7QTXy9IltOCabjRrLG-Mk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
