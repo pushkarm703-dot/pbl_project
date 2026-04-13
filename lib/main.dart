@@ -8,9 +8,17 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:image/image.dart' as img;
+import 'image_validator.dart';
+import 'package:hive_flutter/hive_flutter.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 
-// Import our image validator
-part 'image_validator.dart';
+Future<bool> isOnline() async {
+  var result = await Connectivity().checkConnectivity();
+  return result != ConnectivityResult.none;
+}
+
+
+
 
 // ─────────────────────────────────────────────
 // MAIN
@@ -18,7 +26,28 @@ part 'image_validator.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
+  await Hive.initFlutter(); // ✅ ADD THIS
+  await Hive.openBox('offline_reports'); // ✅ ADD THIS
   runApp(const MyApp());
+
+}
+
+Future<void> syncOfflineReports() async {
+  final online = await isOnline();
+  if (!online) return;
+
+  final box = Hive.box('offline_reports');
+
+  for (int i = 0; i < box.length; i++) {
+    final data = Map<String, dynamic>.from(box.getAt(i));
+
+    await _firestore.collection('reports').doc(data['id']).set({
+      ...data,
+      'timestamp': FieldValue.serverTimestamp(),
+    });
+  }
+
+  await box.clear();
 }
 
 // ─────────────────────────────────────────────
@@ -196,7 +225,9 @@ class _MyAppState extends State<MyApp> {
             ),
           ),
 
-          home: const UserTypePage(),
+          home: _auth.currentUser != null
+              ? const UserPage()
+              : const UserTypePage(),
           routes: {
             '/user_type':   (_) => const UserTypePage(),
             '/login':       (_) => const LoginPage(),
@@ -799,12 +830,17 @@ class _UserPageState extends State<UserPage> {
   bool _loadingMap = true;
   final MapController _mapController = MapController();
 
+
   User? get _me => _auth.currentUser;
   String get _name =>
       _me?.displayName ?? _me?.email?.split('@').first ?? 'User';
 
   @override
-  void initState() { super.initState(); _fetchLocation(); }
+  void initState() {
+    super.initState();
+    _fetchLocation();
+    syncOfflineReports(); // ✅ ADD THIS LINE
+  }
 
   Future<void> _fetchLocation() async {
     try {
@@ -1296,25 +1332,36 @@ class _ReportProblemPageState extends State<ReportProblemPage> {
   bool _validating = false;
 
   @override
-  void initState() { super.initState(); _getLocation(); }
+  void initState() {
+    super.initState();
+    _getLocation();
+
+    // ✅ ADD THIS (IMPORTANT)
+
+  }
 
   Future<void> _getLocation() async {
     try {
       if (!await Geolocator.isLocationServiceEnabled()) {
-        setState(() => _locationText = 'Location services disabled.'); return;
+        setState(() => _locationText = 'Location services disabled.');
+        return;
       }
       LocationPermission p = await Geolocator.checkPermission();
-      if (p == LocationPermission.denied) p = await Geolocator.requestPermission();
-      if (p == LocationPermission.denied || p == LocationPermission.deniedForever) {
-        setState(() => _locationText = 'Location permission denied.'); return;
+      if (p == LocationPermission.denied) {
+        p = await Geolocator.requestPermission();
+      }
+      if (p == LocationPermission.denied ||
+          p == LocationPermission.deniedForever) {
+        setState(() => _locationText = 'Location permission denied.');
+        return;
       }
       final pos = await Geolocator.getCurrentPosition(
           desiredAccuracy: LocationAccuracy.high);
       setState(() {
-        _lat = pos.latitude; _lng = pos.longitude;
+        _lat = pos.latitude;
+        _lng = pos.longitude;
         _locationText =
-        'Lat: ${pos.latitude.toStringAsFixed(5)},  '
-            'Lng: ${pos.longitude.toStringAsFixed(5)}';
+        'Lat: ${pos.latitude.toStringAsFixed(5)},  Lng: ${pos.longitude.toStringAsFixed(5)}';
       });
     } catch (_) {
       setState(() => _locationText = 'Error fetching location.');
@@ -1331,43 +1378,21 @@ class _ReportProblemPageState extends State<ReportProblemPage> {
           _validationResult = null;
         });
 
-        // Validate the image with ML
+        // 🔥 ML VALIDATION TRIGGER
         await _validateImage(f.path);
       }
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Camera error: $e')));
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Camera error: $e')));
+      }
     }
   }
 
   Future<void> _validateImage(String imagePath) async {
     setState(() => _validating = true);
 
-    // Show loading message
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Row(
-            children: [
-              SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: Colors.white,
-                ),
-              ),
-              SizedBox(width: 16),
-              Text('🤖 Validating image with AI...'),
-            ],
-          ),
-          duration: Duration(seconds: 3),
-        ),
-      );
-    }
-
     try {
-      // Run ML validation
       final result = await _validator.validateImage(imagePath);
 
       setState(() {
@@ -1375,252 +1400,111 @@ class _ReportProblemPageState extends State<ReportProblemPage> {
         _validating = false;
       });
 
-      // Show result to user
       if (mounted) {
-        if (!result.isValid) {
-          _showInvalidImageDialog(result);
-        } else if (result.isHighConfidence) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Row(
-                children: [
-                  const Icon(Icons.check_circle, color: Colors.white),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      '✅ Valid hazard detected: ${result.category}\n'
-                          'Confidence: ${result.confidence.toStringAsFixed(0)}%',
-                    ),
-                  ),
-                ],
-              ),
-              backgroundColor: Colors.green,
-              duration: const Duration(seconds: 3),
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Result: ${result.category} (${result.confidence.toStringAsFixed(1)}%)',
             ),
-          );
-        } else if (result.needsReview) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Row(
-                children: [
-                  Icon(Icons.info, color: Colors.white),
-                  SizedBox(width: 12),
-                  Expanded(
-                    child: Text('⚠️ Image will be reviewed by admin'),
-                  ),
-                ],
-              ),
-              backgroundColor: Colors.orange,
-              duration: Duration(seconds: 3),
-            ),
-          );
-        }
+          ),
+        );
       }
     } catch (e) {
       setState(() => _validating = false);
-      print('Validation error: $e');
     }
-  }
-
-  void _showInvalidImageDialog(ValidationResult result) {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Row(
-          children: [
-            Icon(Icons.warning_amber_rounded, color: Colors.red, size: 28),
-            SizedBox(width: 8),
-            Expanded(child: Text('Invalid Image Detected')),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.red.shade50,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Detected:',
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.red,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    result.detectedObject,
-                    style: const TextStyle(fontSize: 14),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-            const Text(
-              'Please capture an image of a road hazard:',
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              '✓ Potholes\n'
-                  '✓ Cracked or damaged roads\n'
-                  '✓ Debris on road\n'
-                  '✓ Missing road signs\n'
-                  '✓ Flooded areas',
-              style: TextStyle(fontSize: 13, height: 1.5),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              // Allow submission anyway
-            },
-            child: const Text('Submit Anyway',
-                style: TextStyle(color: Colors.grey)),
-          ),
-          ElevatedButton.icon(
-            onPressed: () {
-              Navigator.pop(context);
-              setState(() {
-                _imageFile = null;
-                _validationResult = null;
-              });
-              _pickImage(); // Retake photo
-            },
-            icon: const Icon(Icons.camera_alt, size: 20),
-            label: const Text('Retake Photo'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.orangeAccent,
-              foregroundColor: Colors.white,
-            ),
-          ),
-        ],
-      ),
-    );
   }
 
   Future<void> _submit() async {
     if (_imageFile == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Please capture an image first.')));
+        const SnackBar(content: Text('Please capture an image first.')),
+      );
       return;
+
     }
     if (_descCtrl.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Please add a description.')));
+        const SnackBar(content: Text('Please add a description.')),
+      );
       return;
     }
-    setState(() => _submitting = true);
-    try {
-      final user = _auth.currentUser!;
-      final id   = DateTime.now().millisecondsSinceEpoch.toString();
-
-      // Get user's display name from Firestore or Auth
-      String userName = user.displayName ?? 'Unknown';
-      try {
-        final uDoc = await _firestore
-            .collection('users').doc(user.uid).get();
-        userName = uDoc.data()?['name'] ?? userName;
-      } catch (_) {}
-
-      // Save report to Firestore — image stored as LOCAL PATH only
-      // (No Firebase Storage required)
-      await _firestore.collection('reports').doc(id).set({
-        'id':          id,
-        'userId':      user.uid,
-        'userName':    userName,
-        'userEmail':   user.email ?? '',
-        'location':    _locationText,
-        'latitude':    _lat ?? 0.0,
-        'longitude':   _lng ?? 0.0,
-        'imageUrl':    '',            // no cloud storage
-        'localPath':   _imageFile!.path,  // local device path
-        'description': _descCtrl.text.trim(),
-        'status':      'pending',
-        'timestamp':   FieldValue.serverTimestamp(),
-
-        // ML Validation Data (for admin review)
-        'mlValidated': _validationResult?.isValid ?? false,
-        'mlConfidence': _validationResult?.confidence ?? 0.0,
-        'mlCategory': _validationResult?.category ?? 'Unknown',
-        'mlDetectedObject': _validationResult?.detectedObject ?? 'Not validated',
-        'needsReview': _validationResult?.needsReview ?? true,
-      });
-
-      if (!mounted) return;
-      setState(() => _submitting = false);
-
-      await showDialog(
-        context: context,
-        builder: (_) => AlertDialog(
-          shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16)),
-          title: const Row(children: [
-            Icon(Icons.check_circle, color: Colors.green),
-            SizedBox(width: 8),
-            Text('Report Submitted!'),
-          ]),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: Image.file(File(_imageFile!.path),
-                    height: 120, width: double.infinity,
-                    fit: BoxFit.cover),
-              ),
-              const SizedBox(height: 8),
-              Text('Location: $_locationText',
-                  style: const TextStyle(fontSize: 12)),
-              const SizedBox(height: 4),
-              Text('Description: ${_descCtrl.text.trim()}',
-                  style: const TextStyle(fontSize: 12)),
-              const SizedBox(height: 8),
-              const Text('Admin has been notified 🙏',
-                  style: TextStyle(color: Colors.green,
-                      fontWeight: FontWeight.w600)),
-            ],
-          ),
-          actions: [
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.orangeAccent),
-              onPressed: () {
-                Navigator.of(context).pop();
-                setState(() { _imageFile = null; _descCtrl.clear(); });
-              },
-              child: const Text('OK',
-                  style: TextStyle(color: Colors.white)),
-            ),
-          ],
+    // 🚫 ML CONFIDENCE CHECK
+    if (_validationResult == null || _validationResult!.confidence < 70) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Image rejected: Low confidence. Please upload a clearer pothole image.'),
         ),
       );
-    } catch (e) {
-      if (mounted) {
-        setState(() => _submitting = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Submit failed: ${e.toString()}'),
-          backgroundColor: Colors.red,
-          duration: const Duration(seconds: 5),
-        ));
+      return;
+    }
+
+    setState(() => _submitting = true);
+
+    try {
+      final user = _auth.currentUser!;
+      final id = DateTime.now().millisecondsSinceEpoch.toString();
+
+      final online = await isOnline();
+
+      final reportData = {
+        'id': id,
+        'userId': user.uid,
+        'userName': user.displayName ??
+            user.email?.split('@').first ??
+            "Unknown",
+        'location': _locationText,
+        'latitude': _lat ?? 0.0,
+        'longitude': _lng ?? 0.0,
+        'localPath': _imageFile!.path,
+        'description': _descCtrl.text.trim(),
+        'status': 'pending',
+        'timestamp': DateTime.now().toString(),
+
+        // ML DATA
+        'mlValidated': _validationResult != null ? _validationResult!.isValid : false,
+        'mlConfidence': _validationResult != null ? _validationResult!.confidence : 0.0,
+        'mlCategory': _validationResult != null ? _validationResult!.category : 'Not Checked',
+      };
+
+      if (online) {
+        await _firestore.collection('reports').doc(id).set({
+          ...reportData,
+          'timestamp': FieldValue.serverTimestamp(),
+        });
+      } else {
+        final box = Hive.box('offline_reports');
+        await box.add(reportData);
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Saved offline. Will sync later.')),
+        );
       }
+
+      if (!mounted) return;
+      setState(() {
+        _submitting = false;
+        _imageFile = null;
+        _descCtrl.clear();
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Report submitted successfully!')),
+      );
+    } catch (e) {
+      setState(() => _submitting = false);
     }
   }
 
   @override
-  void dispose() { _descCtrl.dispose(); super.dispose(); }
+  void dispose() {
+    _descCtrl.dispose();
+
+
+
+
+    super.dispose();
+  }
+
 
   @override
   Widget build(BuildContext context) {
@@ -2377,7 +2261,9 @@ class FAQsPage extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────
-// ADMIN DASHBOARD
+// ─────────────────────────────────────────────
+// ADMIN DASHBOARD — FIXED VERSION
+// Filtering is done client-side to avoid Firestore composite index issues
 // ─────────────────────────────────────────────
 class AdminDashboard extends StatefulWidget {
   const AdminDashboard({super.key});
@@ -2388,15 +2274,12 @@ class AdminDashboard extends StatefulWidget {
 class _AdminDashboardState extends State<AdminDashboard> {
   String _filter = 'All';
 
+  // ✅ FIXED: Always fetch ALL reports — filter is applied in the UI
   Stream<QuerySnapshot> get _stream {
-    final col = _firestore.collection('reports')
-        .orderBy('timestamp', descending: true);
-    switch (_filter) {
-      case 'Pending':     return col.where('status', isEqualTo: 'pending').snapshots();
-      case 'In Progress': return col.where('status', isEqualTo: 'inProgress').snapshots();
-      case 'Completed':   return col.where('status', isEqualTo: 'completed').snapshots();
-      default:            return col.snapshots();
-    }
+    return _firestore
+        .collection('reports')
+        .orderBy('timestamp', descending: true)
+        .snapshots();
   }
 
   Future<void> _setStatus(String docId, String status) async =>
@@ -2404,6 +2287,16 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
   Future<void> _delete(String docId) async =>
       _firestore.collection('reports').doc(docId).delete();
+
+  // ✅ FIXED: Map UI label → Firestore status string
+  String _filterToStatus(String filter) {
+    switch (filter) {
+      case 'Pending':     return 'pending';
+      case 'In Progress': return 'inProgress';
+      case 'Completed':   return 'completed';
+      default:            return '';
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -2422,30 +2315,43 @@ class _AdminDashboardState extends State<AdminDashboard> {
         ],
       ),
       body: StreamBuilder<QuerySnapshot>(
-        // Summary counts always from ALL reports
-        stream: _firestore.collection('reports').snapshots(),
-        builder: (ctx, allSnap) {
-          final all     = allSnap.data?.docs ?? [];
-          final pending = all.where((d) =>
-          (d.data() as Map)['status'] == 'pending').length;
-          final inProg  = all.where((d) =>
-          (d.data() as Map)['status'] == 'inProgress').length;
-          final done    = all.where((d) =>
-          (d.data() as Map)['status'] == 'completed').length;
+        stream: _stream,
+        builder: (ctx, snap) {
+          if (snap.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (snap.hasError) {
+            return Center(child: Text('Error: ${snap.error}'));
+          }
+
+          final allDocs = snap.data?.docs ?? [];
+
+          // ✅ Count by status from ALL docs
+          final pending  = allDocs.where((d) => (d.data() as Map)['status'] == 'pending').length;
+          final inProg   = allDocs.where((d) => (d.data() as Map)['status'] == 'inProgress').length;
+          final done     = allDocs.where((d) => (d.data() as Map)['status'] == 'completed').length;
+
+          // ✅ Apply filter client-side
+          final filteredDocs = _filter == 'All'
+              ? allDocs
+              : allDocs.where((d) {
+            final status = (d.data() as Map<String, dynamic>)['status'] ?? '';
+            return status == _filterToStatus(_filter);
+          }).toList();
 
           return Column(children: [
-            // Summary
+            // Summary row
             Container(
               color: Colors.grey[100],
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
               child: Row(children: [
-                _sum('Total', all.length.toString(), Colors.blueGrey),
+                _sum('Total',       allDocs.length.toString(), Colors.blueGrey),
                 const SizedBox(width: 6),
-                _sum('Pending', pending.toString(), Colors.orange),
+                _sum('Pending',     pending.toString(),        Colors.orange),
                 const SizedBox(width: 6),
-                _sum('In Progress', inProg.toString(), Colors.blue),
+                _sum('In Progress', inProg.toString(),         Colors.blue),
                 const SizedBox(width: 6),
-                _sum('Done', done.toString(), Colors.green),
+                _sum('Done',        done.toString(),           Colors.green),
               ]),
             ),
 
@@ -2456,7 +2362,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 child: Row(
-                  children: ['All','Pending','In Progress','Completed'].map((f) {
+                  children: ['All', 'Pending', 'In Progress', 'Completed'].map((f) {
                     final sel = _filter == f;
                     return GestureDetector(
                       onTap: () => setState(() => _filter = f),
@@ -2467,13 +2373,16 @@ class _AdminDashboardState extends State<AdminDashboard> {
                         decoration: BoxDecoration(
                           color: sel ? Colors.grey[700] : Colors.grey[100],
                           borderRadius: BorderRadius.circular(20),
-                          border: Border.all(color: sel
-                              ? Colors.grey[700]! : Colors.grey[300]!),
+                          border: Border.all(
+                              color: sel ? Colors.grey[700]! : Colors.grey[300]!),
                         ),
-                        child: Text(f, style: TextStyle(
-                            color: sel ? Colors.white : Colors.black54,
-                            fontWeight: sel ? FontWeight.bold : FontWeight.normal,
-                            fontSize: 13)),
+                        child: Text(f,
+                            style: TextStyle(
+                                color: sel ? Colors.white : Colors.black54,
+                                fontWeight: sel
+                                    ? FontWeight.bold
+                                    : FontWeight.normal,
+                                fontSize: 13)),
                       ),
                     );
                   }).toList(),
@@ -2483,30 +2392,28 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
             // Report list
             Expanded(
-              child: StreamBuilder<QuerySnapshot>(
-                stream: _stream,
-                builder: (ctx, snap) {
-                  if (snap.connectionState == ConnectionState.waiting) {
-                    return const Center(child: CircularProgressIndicator());
-                  }
-                  final docs = snap.data?.docs ?? [];
-                  if (docs.isEmpty) {
-                    return Center(child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.inbox_outlined, size: 80, color: Colors.grey[300]),
-                        const SizedBox(height: 12),
-                        Text('No reports found.',
-                            style: TextStyle(color: Colors.grey[400], fontSize: 16)),
-                      ],
-                    ));
-                  }
-                  return ListView.builder(
-                    padding: const EdgeInsets.all(14),
-                    itemCount: docs.length,
-                    itemBuilder: (_, i) => _card(docs[i]),
-                  );
-                },
+              child: filteredDocs.isEmpty
+                  ? Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.inbox_outlined,
+                        size: 80, color: Colors.grey[300]),
+                    const SizedBox(height: 12),
+                    Text(
+                      _filter == 'All'
+                          ? 'No reports found.'
+                          : 'No $_filter reports.',
+                      style: TextStyle(
+                          color: Colors.grey[400], fontSize: 16),
+                    ),
+                  ],
+                ),
+              )
+                  : ListView.builder(
+                padding: const EdgeInsets.all(14),
+                itemCount: filteredDocs.length,
+                itemBuilder: (_, i) => _card(filteredDocs[i]),
               ),
             ),
           ]);
@@ -2524,35 +2431,38 @@ class _AdminDashboardState extends State<AdminDashboard> {
         border: Border.all(color: color.withOpacity(0.3)),
       ),
       child: Column(children: [
-        Text(count, style: TextStyle(fontSize: 20,
-            fontWeight: FontWeight.bold, color: color)),
+        Text(count,
+            style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+                color: color)),
         Text(label, style: TextStyle(fontSize: 10, color: color)),
       ]),
     ),
   );
 
   Widget _card(DocumentSnapshot doc) {
-    final d      = doc.data() as Map<String, dynamic>;
-    final docId  = doc.id;
-    final status = statusFromString(d['status'] ?? 'pending');
+    final d       = doc.data() as Map<String, dynamic>;
+    final docId   = doc.id;
+    final status  = statusFromString(d['status'] ?? 'pending');
     final imgUrl  = d['imageUrl']  as String? ?? '';
     final imgPath = d['localPath'] as String? ?? '';
     final ts      = (d['timestamp'] as Timestamp?)?.toDate();
 
     // ML Validation data
-    final mlValidated = d['mlValidated'] as bool? ?? false;
+    final mlValidated  = d['mlValidated']  as bool?   ?? false;
     final mlConfidence = d['mlConfidence'] as double? ?? 0.0;
-    final mlCategory = d['mlCategory'] as String? ?? '';
-    final needsReview = d['needsReview'] as bool? ?? false;
+    final mlCategory   = d['mlCategory']  as String?  ?? '';
+    final needsReview  = d['needsReview'] as bool?    ?? false;
 
     Color sc; IconData si; String sl;
     switch (status) {
       case ReportStatus.inProgress:
-        sc = Colors.blue; si = Icons.autorenew; sl = 'In Progress'; break;
+        sc = Colors.blue;  si = Icons.autorenew;   sl = 'In Progress'; break;
       case ReportStatus.completed:
-        sc = Colors.green; si = Icons.check_circle; sl = 'Completed'; break;
+        sc = Colors.green; si = Icons.check_circle; sl = 'Completed';   break;
       default:
-        sc = Colors.orange; si = Icons.pending; sl = 'Pending';
+        sc = Colors.orange; si = Icons.pending;    sl = 'Pending';
     }
 
     return Card(
@@ -2561,21 +2471,30 @@ class _AdminDashboardState extends State<AdminDashboard> {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
       child: Padding(
         padding: const EdgeInsets.all(12),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          // User + status
+        child:
+        Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          // User + status badge
           Row(children: [
-            CircleAvatar(radius: 16, backgroundColor: Colors.orange.shade100,
-                child: const Icon(Icons.person, color: Colors.orange, size: 18)),
+            CircleAvatar(
+                radius: 16,
+                backgroundColor: Colors.orange.shade100,
+                child: const Icon(Icons.person,
+                    color: Colors.orange, size: 18)),
             const SizedBox(width: 8),
-            Expanded(child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(d['userName'] ?? 'Unknown',
-                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-              Text(d['userEmail'] ?? '',
-                  style: const TextStyle(fontSize: 11, color: Colors.grey)),
-            ])),
+            Expanded(
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(d['userName'] ?? 'Unknown',
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 14)),
+                      Text(d['userEmail'] ?? '',
+                          style:
+                          const TextStyle(fontSize: 11, color: Colors.grey)),
+                    ])),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              padding:
+              const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
               decoration: BoxDecoration(
                 color: sc.withOpacity(0.12),
                 border: Border.all(color: sc),
@@ -2584,93 +2503,88 @@ class _AdminDashboardState extends State<AdminDashboard> {
               child: Row(mainAxisSize: MainAxisSize.min, children: [
                 Icon(si, color: sc, size: 14),
                 const SizedBox(width: 4),
-                Text(sl, style: TextStyle(color: sc, fontSize: 12,
-                    fontWeight: FontWeight.w700)),
+                Text(sl,
+                    style: TextStyle(
+                        color: sc,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700)),
               ]),
             ),
           ]),
           const SizedBox(height: 10),
 
-          // ML Validation Badges
+          // ML Validation badges
           if (mlValidated && mlConfidence >= 70)
             Container(
               margin: const EdgeInsets.only(bottom: 8),
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              padding:
+              const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
                 color: Colors.green.shade50,
                 border: Border.all(color: Colors.green, width: 1.5),
                 borderRadius: BorderRadius.circular(8),
               ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.verified, color: Colors.green, size: 16),
-                  const SizedBox(width: 6),
-                  Text(
-                    '🤖 AI Verified: $mlCategory (${mlConfidence.toStringAsFixed(0)}%)',
-                    style: const TextStyle(
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.verified, color: Colors.green, size: 16),
+                const SizedBox(width: 6),
+                Text(
+                  '🤖 AI Verified: $mlCategory (${mlConfidence.toStringAsFixed(0)}%)',
+                  style: const TextStyle(
                       color: Colors.green,
                       fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ],
-              ),
+                      fontWeight: FontWeight.bold),
+                ),
+              ]),
             ),
 
           if (needsReview && !mlValidated)
             Container(
               margin: const EdgeInsets.only(bottom: 8),
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              padding:
+              const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
                 color: Colors.orange.shade50,
                 border: Border.all(color: Colors.orange, width: 1.5),
                 borderRadius: BorderRadius.circular(8),
               ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.warning_amber, color: Colors.orange, size: 16),
-                  const SizedBox(width: 6),
-                  Text(
-                    '⚠️ Needs Manual Review (${mlConfidence.toStringAsFixed(0)}% confidence)',
-                    style: const TextStyle(
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.warning_amber,
+                    color: Colors.orange, size: 16),
+                const SizedBox(width: 6),
+                Text(
+                  '⚠️ Needs Manual Review (${mlConfidence.toStringAsFixed(0)}% confidence)',
+                  style: const TextStyle(
                       color: Colors.orange,
                       fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ],
-              ),
+                      fontWeight: FontWeight.bold),
+                ),
+              ]),
             ),
 
           if (!mlValidated && !needsReview && mlConfidence > 0)
             Container(
               margin: const EdgeInsets.only(bottom: 8),
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              padding:
+              const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
                 color: Colors.red.shade50,
                 border: Border.all(color: Colors.red, width: 1.5),
                 borderRadius: BorderRadius.circular(8),
               ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.error, color: Colors.red, size: 16),
-                  const SizedBox(width: 6),
-                  Text(
-                    '❌ Invalid Image - Requires Review (${mlConfidence.toStringAsFixed(0)}%)',
-                    style: const TextStyle(
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.error, color: Colors.red, size: 16),
+                const SizedBox(width: 6),
+                Text(
+                  '❌ Invalid Image (${mlConfidence.toStringAsFixed(0)}%)',
+                  style: const TextStyle(
                       color: Colors.red,
                       fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ],
-              ),
+                      fontWeight: FontWeight.bold),
+                ),
+              ]),
             ),
 
-          // Image — local file (no cloud storage needed)
+          // Report image
           _reportImage(url: imgUrl, localPath: imgPath, height: 160),
           const SizedBox(height: 10),
 
@@ -2679,10 +2593,13 @@ class _AdminDashboardState extends State<AdminDashboard> {
           const SizedBox(height: 6),
 
           Row(children: [
-            const Icon(Icons.location_on, color: Colors.orangeAccent, size: 16),
+            const Icon(Icons.location_on,
+                color: Colors.orangeAccent, size: 16),
             const SizedBox(width: 4),
-            Expanded(child: Text(d['location'] ?? '',
-                style: const TextStyle(fontSize: 12, color: Colors.black54))),
+            Expanded(
+                child: Text(d['location'] ?? '',
+                    style: const TextStyle(
+                        fontSize: 12, color: Colors.black54))),
           ]),
           if (ts != null) ...[
             const SizedBox(height: 4),
@@ -2692,7 +2609,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
               Text(
                 '${ts.day}/${ts.month}/${ts.year}  '
                     '${ts.hour}:${ts.minute.toString().padLeft(2, '0')}',
-                style: const TextStyle(fontSize: 12, color: Colors.grey),
+                style:
+                const TextStyle(fontSize: 12, color: Colors.grey),
               ),
             ]),
           ],
@@ -2701,32 +2619,40 @@ class _AdminDashboardState extends State<AdminDashboard> {
           // Action buttons
           Row(children: [
             if (status == ReportStatus.pending)
-              Expanded(child: OutlinedButton.icon(
-                icon: const Icon(Icons.autorenew, size: 15, color: Colors.blue),
-                label: const Text('In Progress',
-                    style: TextStyle(color: Colors.blue, fontSize: 12)),
-                style: OutlinedButton.styleFrom(
-                    side: const BorderSide(color: Colors.blue)),
-                onPressed: () => _setStatus(docId, 'inProgress'),
-              )),
+              Expanded(
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.autorenew,
+                        size: 15, color: Colors.blue),
+                    label: const Text('In Progress',
+                        style: TextStyle(color: Colors.blue, fontSize: 12)),
+                    style: OutlinedButton.styleFrom(
+                        side: const BorderSide(color: Colors.blue)),
+                    onPressed: () => _setStatus(docId, 'inProgress'),
+                  )),
             if (status == ReportStatus.inProgress)
-              Expanded(child: OutlinedButton.icon(
-                icon: const Icon(Icons.check_circle, size: 15, color: Colors.green),
-                label: const Text('Completed',
-                    style: TextStyle(color: Colors.green, fontSize: 12)),
-                style: OutlinedButton.styleFrom(
-                    side: const BorderSide(color: Colors.green)),
-                onPressed: () => _setStatus(docId, 'completed'),
-              )),
+              Expanded(
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.check_circle,
+                        size: 15, color: Colors.green),
+                    label: const Text('Completed',
+                        style:
+                        TextStyle(color: Colors.green, fontSize: 12)),
+                    style: OutlinedButton.styleFrom(
+                        side: const BorderSide(color: Colors.green)),
+                    onPressed: () => _setStatus(docId, 'completed'),
+                  )),
             if (status == ReportStatus.completed)
-              Expanded(child: OutlinedButton.icon(
-                icon: const Icon(Icons.undo, size: 15, color: Colors.orange),
-                label: const Text('Reopen',
-                    style: TextStyle(color: Colors.orange, fontSize: 12)),
-                style: OutlinedButton.styleFrom(
-                    side: const BorderSide(color: Colors.orange)),
-                onPressed: () => _setStatus(docId, 'pending'),
-              )),
+              Expanded(
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.undo,
+                        size: 15, color: Colors.orange),
+                    label: const Text('Reopen',
+                        style:
+                        TextStyle(color: Colors.orange, fontSize: 12)),
+                    style: OutlinedButton.styleFrom(
+                        side: const BorderSide(color: Colors.orange)),
+                    onPressed: () => _setStatus(docId, 'pending'),
+                  )),
             const SizedBox(width: 8),
             OutlinedButton.icon(
               icon: const Icon(Icons.delete, size: 15, color: Colors.red),

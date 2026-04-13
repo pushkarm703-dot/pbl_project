@@ -5,6 +5,8 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
     // Added this line:
     id("com.google.gms.google-services")
+
+
 }
 
 android {
